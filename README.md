@@ -69,7 +69,7 @@ int main(int argc, char* const argv[]) {
     if (args.exists("b")) std::printf("option b\n");
 
     if (args.exists("d")) {
-        std::printf("option d with value '%s'\n", args["-d"].data());
+        std::printf("option d with value %s\n", args["d"].data());
     }
 
     if (args.exists("0")) std::printf("option 0\n");

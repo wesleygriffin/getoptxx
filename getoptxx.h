@@ -151,7 +151,7 @@ public:
      * \param[in] key the option name to check.
      * \return true if \a key was parsed on the command line of false if not.
      */
-    bool exists(key_type const& key) const { return m_parsed.count(key); }
+    bool exists(key_type const& key) const { return m_parsed.count(key)>0; }
 
     /*!
      * \brief Get the value of a parsed argument.
@@ -160,6 +160,9 @@ public:
      * required or was provided and the value is optional.
      */
     auto operator[](key_type const& key) const {
+        if (!exists(key)) {
+            throw std::runtime_error{ "no value for '"+key.to_string()+"'" };
+        }
         return m_parsed.find(key)->second;
     }
 
@@ -170,6 +173,9 @@ public:
      * required or was provided and the value is optional.
      */
     auto operator[](key_type&& key) const {
+        if (!exists(key)) {
+            throw std::runtime_error{ "no value for '"+key.to_string()+"'" };
+        }
         return m_parsed.find(key)->second;
     }
 
@@ -192,11 +198,8 @@ public:
     /*! \brief Destructor. */
     ~arguments() noexcept(true) = default;
 
-    /*! \brief Swap this arguments object with another. */
-    void swap(arguments&) noexcept(true);
-
 private:
-    bool m_help{false};
+    bool m_help{ false };
     std::unordered_map<key_type, value_type> m_parsed{};
     std::vector<value_type> m_unparsed{};
 };
@@ -209,16 +212,16 @@ struct option final {
      * \brief Flags for arguments, which are what is parsed on the command
      * line.
      */
-    enum class argument_flags {
-        none,       /*!< No special behavior for this argument. */
-        optional,   /*!< A value is required for this argument. */
-        required,   /*!< A value is optional for this argument. */
+    enum class argument_flags : short {
+        none,       /*!< No value can be specified for this argument. */
+        optional,   /*!< A value is optional for this argument. */
+        required,   /*!< A value is required for this argument. */
     };
 
     /*!
      * \brief Flags for options, which are what is specified to the parser.
      */
-    enum class option_flags {
+    enum class option_flags : short {
         none     = 0x0, /*!< No special behavior for this option. */
         required = 0x1, /*!< This option is required on the command line. */
     };
@@ -232,64 +235,37 @@ struct option final {
     constexpr option(arguments::key_type const& name,
         argument_flags aflags = argument_flags::none,
         option_flags oflags = option_flags::none) noexcept(true)
-    : m_aflags{aflags}, m_oflags{oflags} {
-        if (name.size()==1) {
-            m_short = name;
-        } else if (name[1]!=',') {
-            m_long = name;
-        } else {
-            m_short = {&name[0], 1};
-            m_long = {&name[2], name.size()-2};
-        }
-    }
+    : aflags{ aflags }, oflags{ oflags },
+      shortopt{
+          (name.size()>1) ? ((name[1]==',') ? &name[0] : "") : &name[0],
+          (name.size()>1) ? ((name[1]==',') ? 1u       : 0u) : 1u
+      },
+      longopt{
+          (name.size()==1) ? "" : (name[1]==',') ? &name[2]      : &name[0],
+          (name.size()==1) ? 0  : (name[1]==',') ? name.size()-2 : name.size()
+      }
+    {}
 
     /*! \brief Copy constructor. */
     constexpr option(option const&) = default;
+    /*! \brief Move constructor. */
+    constexpr option(option&&) noexcept(true) = default;
     /*! \brief Copy assignment operator. */
     option& operator=(option const&) = default;
+    /*! \brief Move assignment operator. */
+    option& operator=(option&&) noexcept(true) = default;
     /*! \brief Destructor. */
     ~option() noexcept(true) = default;
 
-    /*! \brief Swap this option object with another. */
-    void swap(option&) noexcept(true);
-
-private:
-    arguments::key_type m_short{};
-    arguments::key_type m_long{};
-    argument_flags m_aflags{argument_flags::none};
-    option_flags m_oflags{option_flags::none};
-
-    friend class arguments;
+    argument_flags const aflags{argument_flags::none};
+    option_flags const oflags{option_flags::none};
+    arguments::key_type const shortopt{}, longopt{};
 };
 
-inline void arguments::swap(arguments& o) noexcept(true) {
-    using std::swap;
-    swap(m_help, o.m_help);
-    swap(m_parsed, o.m_parsed);
-    swap(m_unparsed, o.m_unparsed);
+inline std::string to_string(option const& o) {
+    if (o.longopt.empty()) return o.shortopt.to_string();
+    else return o.longopt.to_string();
 }
-
-/*!
- * \brief Swap two arguments objects.
- * \param[in] a
- * \param[in] b
- */
-inline void swap(arguments& a, arguments& b) noexcept(true) { a.swap(b); }
-
-inline void option::swap(option& o) noexcept(true) {
-    using std::swap;
-    swap(m_short, o.m_short);
-    swap(m_long, o.m_long);
-    swap(m_aflags, o.m_aflags);
-    swap(m_oflags, o.m_oflags);
-}
-
-/*!
- * \brief Swap two option objects.
- * \param[in] a
- * \param[in] b
- */
-inline void swap(option& a, option& b) noexcept(true) { a.swap(b); }
 
 } // inline namespace v1
 } // namespace getoptxx
@@ -297,65 +273,55 @@ inline void swap(option& a, option& b) noexcept(true) { a.swap(b); }
 inline auto getoptxx::v1::arguments::parse(int argc, char* const argv[],
     std::initializer_list<option> options) -> arguments {
     arguments args;
-    auto const ae = std::find_if(argv+1, argv+argc,
-                                 [] (key_type const& s) { return s == "--"; });
+    auto const argend = std::find_if(argv+1, argv+argc,
+                                     [](auto s) { return s=="--"; });
 
-    for (auto&& a = argv+1; a != ae && !args.help(); ++a) {
-        if (!*a) continue; // ignore empty arguments
+    for (auto&& arg=argv+1; arg!=argend && !args.help(); ++arg) {
+        if (!*arg) continue; // ignore empty arguments
 
-        if ((*a)[0] != '-') { // non-option arguments
-            args.m_unparsed.push_back(*a);
+        if ((*arg)[0] != '-') { // non-option arguments
+            args.m_unparsed.push_back(*arg);
             continue;
-        } else if (!(*a)[1]) { // ignore a single '-'
+        } else if (!(*arg)[1]) { // ignore a single '-'
             continue;
         }
 
-        auto const s = key_type{((*a)[1] == '-') ? &(*a)[2] : &(*a)[1]};
-        args.m_help = (s == "h" || s == "help");
+        // can now assume: a[0]=='-' && a.size()>1
+        key_type const str{ ((*arg)[1]=='-') ? &(*arg)[2] : &(*arg)[1] };
+        args.m_help = (str=="h" || str=="help");
         if (args.m_help) return args;
 
-        auto const o = std::find_if(std::begin(options), std::end(options),
-            [&s] (auto o) { return s == o.m_short || s == o.m_long; });
-        if (o == std::end(options)) {
-            auto const what = "unknown option '"+s.to_string()+"'";
-            throw std::runtime_error{std::move(what)};
+        auto const opt = std::find_if(std::begin(options), std::end(options),
+            [&str](auto opt) { return str==opt.shortopt||str==opt.longopt; });
+        if (opt==end(options)) {
+            throw std::runtime_error{ "unknown option '"+str.to_string()+"'" };
         }
 
-        auto const v = [&s,&o,&a,&ae] () -> value_type {
-            if (o->m_aflags == option::argument_flags::required ||
-                o->m_aflags == option::argument_flags::optional) {
-                if (a+1 < ae && (a+1 && (*(a+1))[0] != '-')) {
-                    return *(++a);
-                } else if (o->m_aflags == option::argument_flags::required) {
-                    auto const what =
-                        "option '"+s.to_string()+"' requires a value";
-                    throw std::runtime_error{std::move(what)};
-                }
+        auto const val = [&str,aflags=opt->aflags,&arg,&argend]()->value_type {
+            bool const present = (arg+1<argend || (*(arg+1))[0]!='-');
+            if (aflags==option::argument_flags::none) return {};
+            if (aflags==option::argument_flags::required && !present) {
+                throw std::runtime_error{
+                    "option '"+str.to_string()+"' requires a value" };
             }
-            return {};
+            if (present) return *(++arg);
+            else return {};
         }();
 
-        if (!o->m_short.empty()) {
-            args.m_parsed.insert(std::make_pair(o->m_short, v));
-        }
-        if (!o->m_long.empty()) {
-            args.m_parsed.insert(std::make_pair(o->m_long, v));
-        }
+        if (!opt->shortopt.empty()) args.m_parsed.emplace(opt->shortopt, val);
+        if (!opt->longopt.empty()) args.m_parsed.emplace(opt->longopt, val);
     }
 
-    std::for_each(std::begin(options), std::end(options), [&args] (auto&& o) {
-        if (o.m_oflags != option::option_flags::required) return;
+    std::for_each(std::begin(options), std::end(options), [&args](auto&& o) {
+        if (o.oflags != option::option_flags::required) return;
 
-        if ((!o.m_short.empty() && args.m_parsed.count(o.m_short) == 0)||
-            (!o.m_long.empty() && args.m_parsed.count(o.m_long) == 0)) {
-            auto const what = "option '"+
-                (!o.m_long.empty()?o.m_long.to_string():o.m_short.to_string())+
-                "' required";
-            throw std::runtime_error{std::move(what)};
+        if ((!o.shortopt.empty() && args.m_parsed.count(o.shortopt)==0)||
+            (!o.longopt.empty() && args.m_parsed.count(o.longopt)==0)) {
+            throw std::runtime_error{ "option '"+to_string(o)+"' required" };
         }
     });
 
-    args.m_unparsed.insert(std::end(args.m_unparsed), ae+1, argv+argc);
+    args.m_unparsed.insert(std::end(args.m_unparsed), argend+1, argv+argc);
     return args;
 }
 
